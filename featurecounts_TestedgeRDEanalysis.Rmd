@@ -1,0 +1,643 @@
+---
+title: "edgeR practice"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#PLEASE READ: Instructions/things you should know
+
+#All of this code for some reason works better when you paste it into the console/do command-return for each line. I would not recommend running the script within the file
+#Throughout, I will put comments to the right of lines of code to explain what each one does
+
+#BEFORE YOU BEGIN:
+#make a copy of this file into your folder so you can edit it however you'd like/keep this file for reference for future users
+```
+
+```{r}
+#load edgeR and other packages needed for figures
+  library(edgeR)
+  library(dplyr)
+  library(gplots)
+  library(tidyverse)
+  library(biomaRt)
+  library(EnhancedVolcano)
+  library(AnnotationDbi)
+  library(org.Mm.eg.db)
+  library(readxl)
+  library(ggplot2)
+  library(magrittr)
+```
+
+```{r setup, include=FALSE}
+#set working directory, annotation files, and variable for count file matrix
+
+  setwd("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/DEanalysis code/") #set this to your home directory
+  
+  #if importing one matrix
+  featurecounts <- read.table("featureCounts/featurecounts_trim.txt", header = T)
+  
+  #extract feature length (total exon length)
+  featurelengths <- dplyr::select(featurecounts, "Geneid", "Length")
+  
+  #remove non-count columns and shorten sample names
+  row.names(featurecounts) <- featurecounts$Geneid
+  featurecounts <- featurecounts[, -c(1:6)] # exclude superfluous columns
+  colnames(featurecounts) <- sub(".*mapped.", "", colnames(featurecounts))
+  colnames(featurecounts) <- sub("Aligned.*", "", colnames(featurecounts))
+  
+  #create DGE matrix
+  list <- DGEList(counts=featurecounts) 
+```
+
+```{r}
+## Build a biomart query to get gene IDs from ENSEMBL IDs- use the most updated ensembl database that matches the gff file you used for producing counts
+
+  mart = biomaRt::useMart("ENSEMBL_MART_ENSEMBL", dataset = "mmusculus_gene_ensembl")
+  gene.annotations <- biomaRt::getBM(mart = mart, attributes=c("ensembl_gene_id", "external_gene_name"))
+  
+  # Filter and re-order gene.annotations to match the order in feature counts matrix
+  gene.annotations <- gene.annotations %>% dplyr::filter(ensembl_gene_id %in% rownames(featurecounts))
+  gene.annotations <- gene.annotations[order(match(gene.annotations$ensembl_gene_id, rownames(featurecounts))),]
+  
+```
+
+```{r setup, include=FALSE}
+  ##make data frame with tissue groups, then design matrix
+  group <- factor(c("hM3DqIP","hM3DqIP","hM3DqIP","hM3DqIP","ControlIP","ControlIP","ControlIP","ControlIP", "hM3DqInput","hM3DqInput","hM3DqInput","hM3DqInput","ControlInput","ControlInput","ControlInput","ControlInput")) #assign tissue groups in order of the files in directory
+  
+  #design matrix based on tissue group
+  design_grp <- model.matrix(~0+group) 
+  colnames(design_grp) <- levels(group)
+  rownames(design_grp) <- colnames(list)
+  
+  contrasts <- makeContrasts( ControlInputvsControlIP = ControlIP-ControlInput,
+                              ControlIPvshM3DqIP = hM3DqIP-ControlIP,
+                              ControlInputvshM3DqInput = hM3DqInput-ControlInput,
+                              levels=design_grp)
+```
+
+```{r setup, include=FALSE}
+  #produce FPKM matrix of raw counts
+  CPM <- as.data.frame(cpm(list, log=F))
+  names <- as.data.frame(rownames(CPM))
+  colnames(names) <- "Geneid"
+  names <- dplyr::left_join(names, featurelengths, by = "Geneid")
+  colnames(gene.annotations)[1] <- "Geneid"
+  names <- dplyr::left_join(names, gene.annotations, by = "Geneid")
+  FPKM <- as.data.frame(rpkm(list, gene.length = names$Length, log=F))
+  
+  #extract FPKMs into file
+  FPKM[,17:18] <- dplyr::select(names, "external_gene_name", "Length") #change row numbers if using less than 16 groups
+  FPKM <- FPKM %>% dplyr::select(external_gene_name, everything())
+  write.csv(FPKM, "/Users/mikaholtz/Downloads/unfiltered_FPKM.csv")
+```
+
+```{r}
+#Continue with cleaning list for DEG analysis
+  #clean DGE matrix
+  
+  #filter out low expression genes that have greater than 0.5 CPM in 4 or more groups
+  keep <- rowSums(cpm(list) > 0.5) >= 4
+  list <- list[keep, , keep.lib.sizes=FALSE]
+  
+  #normalize counts (TMM)
+  list <- calcNormFactors(list)
+
+  #estimate dispersions for each design you have
+  listgrp <- estimateDisp(list, design_grp)
+```
+
+```{r setup, include=FALSE}
+  #produce another FPKM matrix for filtered and TMM normalized counts
+  CPM_TMM <- as.data.frame(cpm(list, log=F))
+  names <- as.data.frame(rownames(CPM_TMM))
+  colnames(names) <- "Geneid"
+  names <- dplyr::left_join(names, featurelengths, by = "Geneid")
+  colnames(gene.annotations)[1] <- "Geneid"
+  names <- dplyr::left_join(names, gene.annotations, by = "Geneid")
+  FPKM_TMM <- as.data.frame(rpkm(list, gene.length = names$Length, log=F))
+  
+  #extract FPKMs into file
+  FPKM_TMM[,17:18] <- dplyr::select(names, "external_gene_name", "Length") #change row numbers if using less than 16 groups
+  FPKM_TMM <- FPKM_TMM %>% dplyr::select(external_gene_name, everything())
+  write.csv(FPKM_TMM, "/Users/mikaholtz/Downloads/filteredTMM_FPKM.csv") #I used these values for figures
+
+```
+
+```{r setup, include=FALSE}
+#extra figures you can make that describe the dispersion of your data
+
+  #PCA plot - groups samples based on how similar their expression patterns are
+  pch <- c(16,16,16,16)
+  colors <- rep(c("#D4D4D4", "#7C7C7C", "#FFA0A0", "#F94040"))
+  plotMDS(listgrp, main=NULL, col=colors[group], cex = 1.5, pch=pch, gene.selection = "common") +
+  theme(panel.border=element_blank())
+  box(lwd=2)
+  axis(side=1,lwd=2)
+  axis(side=2,lwd=2)
+  
+  legend("top", legend=levels(group), pch=pch, col=colors, ncol=2)
+  
+  #histogram of average log CPM
+  AveLogCPM <- aveLogCPM(listgrp)
+  hist(AveLogCPM)
+```
+    
+```{r}   
+  #ControlIP vs hM3DqIP DE analysis
+
+  fit <- glmQLFit(listgrp, design_grp)
+  
+      qlf_ControlIPvshM3DqIP <- glmQLFTest(fit, contrast = contrasts[ , "ControlIPvshM3DqIP"]) #fit this contrast to the comparison you want to make
+      results_ControlIPvshM3DqIP <- topTags(qlf_ControlIPvshM3DqIP, n = Inf)
+      summary(decideTests(qlf_ControlIPvshM3DqIP)) #gives you number of up/down DEGs and non-significant genes
+
+      names <- as.data.frame(rownames(results_ControlIPvshM3DqIP$table)) #this and the next three lines swap in the gene symbols
+      colnames(names) <- "Geneid"
+      colnames(gene.annotations)[1] <- "Geneid"
+      names <- dplyr::left_join(names, gene.annotations, by = "Geneid")
+      
+      #add gene ID to table
+      Allresults_ControlIPvshM3DqIP <- results_ControlIPvshM3DqIP$table
+      Allresults_ControlIPvshM3DqIP$geneID <- c(names$external_gene_name)
+      Allresults_ControlIPvshM3DqIP <- Allresults_ControlIPvshM3DqIP %>% dplyr::select(geneID, everything())
+      
+      write.csv(Allresults_ControlIPvshM3DqIP, file="DEresults_ControlIPvshM3DqIP.csv") #save csv file of DE results
+```
+
+```{r}   
+  #ControlInput vs hM3DqInput DE analysis
+
+  fit <- glmQLFit(listgrp, design_grp)
+  
+      qlf_ControlInputvshM3DqInput <- glmQLFTest(fit, contrast = contrasts[ , "ControlInputvshM3DqInput"])
+      results_ControlInputvshM3DqInput <- topTags(qlf_ControlInputvshM3DqInput, n = Inf)
+      summary(decideTests(qlf_ControlInputvshM3DqInput)) #gives you number of up/down DEGs and non-significant genes
+
+      names <- as.data.frame(rownames(results_ControlInputvshM3DqInput$table)) #this and the next three lines swap in the gene symbols
+      colnames(names) <- "Geneid"
+      names <- dplyr::left_join(names, gene.annotations, by = "Geneid")
+      
+      #add gene ID to table
+      Allresults_ControlInputvshM3DqInput <- results_ControlInputvshM3DqInput$table
+      Allresults_ControlInputvshM3DqInput$geneID <- c(names$external_gene_name)
+      Allresults_ControlInputvshM3DqInput <- Allresults_ControlInputvshM3DqInput %>% dplyr::select(geneID, everything())
+      
+      write.csv(Allresults_ControlInputvshM3DqInput, file="DEresults_ControlInputvshM3DqInput.csv") #save csv file of DE results
+```
+
+```{r}   
+  #ControlInput vs ControlIP DE analysis
+
+  fit <- glmQLFit(listgrp, design_grp)
+  
+      qlf_ControlInputvsControlIP <- glmQLFTest(fit, contrast = contrasts[ , "ControlInputvsControlIP"])
+      results_ControlInputvsControlIP <- topTags(qlf_ControlInputvsControlIP, n = Inf)
+      summary(decideTests(qlf_ControlInputvsControlIP)) #gives you number of up/down DEGs and non-significant genes
+
+      names <- as.data.frame(rownames(results_ControlInputvsControlIP$table)) #this and the next three lines swap in the gene symbols
+      colnames(names) <- "Geneid"
+      colnames(gene.annotations) <- c('Geneid','external_gene_name')
+      names <- dplyr::left_join(names, gene.annotations, by = "Geneid")
+      
+      #add gene ID to table
+      Allresults_ControlInputvsControlIP <- results_ControlInputvsControlIP$table
+      Allresults_ControlInputvsControlIP$geneID <- c(names$external_gene_name)
+      Allresults_ControlInputvsControlIP <- Allresults_ControlInputvsControlIP %>% dplyr::select(geneID, everything())
+      
+      write.csv(Allresults_ControlInputvsControlIP, file="DEresults_ControlInputvsControlIP.csv") #save csv file of DE results
+```
+
+```{r}
+    #further visualization and analyses - input appropriate data files
+
+    #volcano plot https://bioconductor.org/packages/devel/bioc/vignettes/EnhancedVolcano/inst/doc/EnhancedVolcano.html
+    keyvals <- ifelse(Allresults_ControlIPvshM3DqIP$logFC < 0 & Allresults_ControlIPvshM3DqIP$FDR < 0.05, 'blue', ifelse(Allresults_ControlIPvshM3DqIP$logFC > 0 & Allresults_ControlIPvshM3DqIP$FDR < 0.05, '#F94040', 'black'))
+    keyvals[is.na(keyvals)] <- 'black'
+    names(keyvals)[keyvals == '#F94040'] <- 'Up'
+    names(keyvals)[keyvals == 'black'] <- 'NS'
+    names(keyvals)[keyvals == 'blue'] <- 'Down'
+
+P1 <- EnhancedVolcano(Allresults_ControlIPvshM3DqIP,
+              lab = NA,
+              x = 'logFC',
+              y = 'FDR',
+              FCcutoff = 0,
+              pCutoff = 0.05,
+              cutoffLineWidth = 0.8,
+              legendPosition = 'top',
+              legendLabSize = 10,
+              legendIconSize = 4.0,
+              colCustom = keyvals,
+              title = NULL,
+              subtitle = NULL,
+              caption = NULL,
+              axisLabSize = 10.0,
+              ylim = c(0,10.5),
+              xlim = c(-3,6),
+              pointSize = 1.0,
+              labSize = 4.0,
+              drawConnectors = TRUE,
+              colAlpha = 1,
+              borderWidth = 1,
+              gridlines.major = FALSE,
+              gridlines.minor = FALSE)
+
+
+P1 +
+  ggplot2::coord_cartesian(xlim=c(-3, 6)) +
+    ggplot2::scale_x_continuous(
+      breaks=seq(-3,6, 3))
+```
+
+```{r}
+    #Upload edited excel file for filtered genes
+    Filteredgenes <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/DEGs_ControlIPvshM3DqIP_Final.xlsx", sheet = "DEGs_FPKM>10_Enrich2"))
+    
+    #volcano plot again
+    keyvals <- ifelse(
+            Filteredgenes$logFC < 0 & Filteredgenes$FDR < 0.05, 'blue',
+              ifelse(Filteredgenes$logFC > 0 & Filteredgenes$FDR < 0.05, '#F94040',
+                'black'))
+    keyvals[is.na(keyvals)] <- 'black'
+    names(keyvals)[keyvals == '#F94040'] <- 'Up'
+    names(keyvals)[keyvals == 'black'] <- 'NS'
+    names(keyvals)[keyvals == 'blue'] <- 'Down'
+
+  P2 <- EnhancedVolcano(Filteredgenes,
+              lab = NA,
+              x = 'logFC',
+              y = 'FDR',
+              xlab = NULL,
+              ylab = NULL,
+              FCcutoff = 0,
+              pCutoff = 0.05,
+              cutoffLineWidth = 1.5,
+              cutoffLineType = "dashed",
+              legendPosition = 'none',
+              legendLabSize = 10,
+              legendIconSize = 1,
+              colCustom = keyvals,
+              title = NULL,
+              subtitle = NULL,
+              caption = NULL,
+              axisLabSize = 10,
+              #ylim = c(0,12),
+              #xlim = c(-3,6),
+              pointSize = 1.5,
+              labSize = 10,
+              drawConnectors = TRUE,
+              colAlpha = 1,
+              borderWidth = 1.5,
+              gridlines.major = FALSE,
+              gridlines.minor = FALSE,
+              labCol = 'black') 
+  
+finalplot <- P2 +
+    scale_x_continuous(breaks = seq(-3, 6, by = 3), limits = c(-3, 6), expand = c(0, 0)) +  # X-axis interval of 1
+    scale_y_continuous(breaks = seq(0, 12, by = 6), limits = c(0, 12), expand = c(0, 0)) + # Y-axis interval of 0.2
+  theme(
+    axis.text.x = element_blank(),
+    axis.text.y = element_blank(),
+    axis.ticks.length = unit(0.3, "cm"),
+    plot.margin = margin(1, 1, 0, 0),
+    axis.ticks = element_line(size = 1.5)
+  )
+
+finalplot
+
+ggsave("/Users/mikaholtz/Downloads/volcano_plot.png", finalplot, width = 8.8, height = 4, units = "cm", dpi = 1000)
+```
+
+```{r}
+      #heatmap of FPKMs for known astrocyte markers and depleted genes
+      Top200Enr <- as.data.frame(read_excel("/Users/mikaholtz/Downloads/AstrocteRNA-seqFPKM-CxStrHIp.xlsx", sheet='Top200up')) #enriched genes
+      Top200Enr <- as.matrix(column_to_rownames(Top200Enr, "Top200Genes"))
+      col.pan <- colorpanel(100, "blue","white","#F94040")
+      cn <- c("OFCInput6","OFCInput8","OFCInput9","OFCInput10","OFCInput1","OFCInput3","OFCInput4","OFCInput5","OFCIP6","OFCIP8","OFCIP9","OFCIP10","OFCIP1","OFCIP3","OFCIP4","OFCIP5")
+      heatmap.2(Top200Enr[,cn], 
+                col=col.pan, 
+                scale = "row", 
+                Rowv=NA, 
+                Colv=NA, 
+                trace="none", 
+                dendrogram="none", 
+                cexCol=1.4, main = NULL, 
+                margins = c(4,10), 
+                labRow = FALSE, 
+                labCol = TRUE, 
+                key.title = NA, 
+                density.info = 'none', 
+                key.xlab = "Z-Score", 
+                keysize = 1, 
+                lmat = rbind(c(0,3),c(2,1),c(0,4)), 
+                lwid = c(0.5,4), 
+                lhei = c(0.5,4,1.25),
+                breaks=seq(-3, 3, length.out=101))
+      
+      Top200Dep <- as.data.frame(read_excel("/Users/mikaholtz/Downloads/AstrocteRNA-seqFPKM-CxStrHIp.xlsx", sheet='Top200down'))      #depleted genes
+      Top200Dep <- as.matrix(column_to_rownames(Top200Dep, "Top200Genes"))
+      heatmap.2(Top200Dep[,cn], 
+                col=col.pan, 
+                scale = "row", 
+                Rowv=NA, 
+                Colv=NA, 
+                trace="none", 
+                dendrogram="none", 
+                cexCol=1.4, 
+                main = NULL, 
+                margins = c(4,10),
+                labRow = FALSE, 
+                labCol = TRUE, 
+                key.title = NA, 
+                density.info = 'none', 
+                key.xlab = "Z-Score", 
+                keysize = 1, 
+                lmat = rbind(c(0,3),c(2,1),c(0,4)), 
+                lwid = c(0.5,4), 
+                lhei = c(0.5,4,1.25),
+                breaks=seq(-3, 3, length.out=101))
+```
+
+```{r}
+GOHeat_fix <- function (data, nlfc, fill.col) 
+{
+  x <- y <- z <- NULL
+  if (missing(nlfc)) 
+    nlfc <- 0
+  else nlfc <- nlfc
+  if (missing(fill.col)) 
+    fill.col <- c("firebrick", "white", "dodgerblue")
+  else fill.col <- fill.col
+  distance <- dist(data)
+  cluster <- hclust(distance)
+  M <- dim(data)[2]
+  nterm <- M - nlfc
+  if (nlfc == 0) {
+    s <- rowSums(data[, 1:nterm])
+    tmp <- NULL
+    for (r in 1:nrow(data)) {
+      tmp <- c(tmp, as.numeric(gsub(1, s[r], data[r, 1:nterm])))
+    }
+  }
+  else {
+    tmp <- NULL
+    for (r in 1:nrow(data)) {
+      tmp <- c(tmp, as.numeric(gsub(1, data[r, (nterm + 
+                                                  1)], data[r, 1:nterm])))
+    }
+  }
+  df <- data.frame(x = factor(rep(cluster$order, each = nterm)), y = rep(colnames(data[, 
+                                                                               1:nterm]), length(rownames(data))), z = tmp, lab = rep(rownames(data), 
+                                                                                                                                      each = nterm))
+  df_o <- df[order(df$x), ]
+  g <- ggplot() +
+    geom_tile(data = df_o, aes(x = x, y = y, fill = z)) +
+    scale_x_discrete(breaks = 1:length(unique(df_o$x)), labels = unique(df_o$lab)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1),
+          axis.title.x = element_blank(),
+          axis.title.y = element_blank(), 
+          axis.text.y = element_text(size = 14),
+          panel.background = element_blank(), 
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank()) +
+    coord_fixed()
+  if (nlfc == 0) {
+    g + scale_fill_gradient2("Count", space = "Lab", low = fill.col[2], 
+                             mid = fill.col[3], high = fill.col[1])
+  }
+  else {
+    g + scale_fill_gradient2("logFC", space = "Lab", low = fill.col[3], 
+                             mid = fill.col[2], high = fill.col[1])
+  }
+}
+
+```
+
+```{r}
+#Vascular genes comparison with IP results
+Vascgenes <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/DEGs_ControlIPvshM3DqIP_Final.xlsx",sheet="All genes")) #import DEG data
+Vascgenes <- dplyr::select(Vascgenes, -1,-4, -14:-15) #remove unnecessary column
+Vascgenes <- Vascgenes[Vascgenes$geneID %in% c("Pld1","Pld2","Pld3","Plpp1","Plpp3","Dagla","Daglb","Ptgs1","Cyp2j6","Cyp2j9","Ephx2"), ] #input select list of genes
+rownames(Vascgenes) <- Vascgenes$geneID
+target_order <- c("Pld1","Pld2","Pld3","Plpp1","Plpp3","Dagla","Daglb","Ptgs1","Cyp2j6","Cyp2j9","Ephx2") # set target order of appearance
+Vascgenes <- Vascgenes[order(match(Vascgenes$geneID, target_order)), ]
+
+write.csv(Vascgenes, "/Users/mikaholtz/Downloads/Vascgenes.csv") #save dataset
+
+library(pheatmap)
+
+FPKM_vasc <- as.matrix(Vascgenes[, c("FPKM_ControlIIP", "FPKM_hM3DqIP")]) #extract FPKM columns
+FPKM_vasc <- log10(FPKM_vasc) #make log10
+
+pheatmap(FPKM_vasc,             # make heatmap
+         color = colorRampPalette(c("white","gray"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+
+LogFC_vasc <- as.matrix(Vascgenes[, c("logFC")]) #extract LogFC column
+color_palette <- colorRampPalette(c("blue", "white", "red"))(100)
+
+# Define breaks centered at zero
+# Get max absolute value for symmetric breaks
+max_val <- max(abs(LogFC_vasc), na.rm = TRUE)
+breaks <- seq(-max_val, max_val, length.out = 101)
+
+pheatmap(LogFC_vasc,             # make heatmap
+         color = color_palette,
+         breaks = breaks,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+
+pval_vasc <- as.matrix(Vascgenes[, c("FDR")]) #extract FDR column
+pval_vasc <- -log10(pval_vasc) #make log10
+
+pheatmap(pval_vasc,             # make heatmap
+         color = colorRampPalette(c("white","#FFDB58"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+
+Astroenr_vasc <- as.matrix(Vascgenes[, c("Astrocyte_enrichment_control", "Astrocyte_enrichment_hM3Dq")]) #extract astrocyte enrichment columns
+#Astroenr_metab <- log10(Astroenr_metab)
+
+pheatmap(Astroenr_vasc,             # make heatmap
+         color = colorRampPalette(c("white","green"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+```
+
+```{r}
+#GO circle plot using metascape imported results
+
+library(GOplot)
+
+OFCGq <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/DEGs_ControlIPvshM3DqIP_Final.xlsx",sheet="DEGs_FPKM>10_Enrich2")) #import DEG data
+OFCGq <- dplyr::select(OFCGq, -1,-4, -9:-14) #remove unnecessary columns
+colnames(OFCGq) <- c('ID','logFC','logCPM','F','Pvalue','adj.P.val') #set column names like so - names should be exact
+
+metascape <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/metascape_results_FPKM10Enr2.xlsx", sheet='Metabolism')) #import metascape data
+       
+circ <- circle_dat(metascape, OFCGq) # make circ object
+zsccol <- c('red', 'white','blue')
+lfccol <- c('#F94040', 'blue')
+
+GOCircle(circ, label.size = 0, zsc.col = zsccol, lfc.col=lfccol) #plot 
+```
+
+
+
+```{r}
+terms <- unique(circ$term) 
+FPKM_TMM <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/DEGs_ControlIPvshM3DqIP_Final.xlsx",sheet="FPKMall_TMMnorm"))
+names(FPKM_TMM)[2] <- "ID"
+FPKM_TMM_av <- dplyr::select(FPKM_TMM, "ID","FPKM_ControlIP", "FPKM_hM3DqIP")
+
+Astroenr <- as.data.frame(read_excel("/Users/mikaholtz/Library/CloudStorage/Box-Box/Int_101262_Laboratory for Glia-Neuron Circuit Dynamics/jnlab-Holtz/hM3Dq/RNA-seq analysis/OFChM3Dq/DEGs_ControlIPvshM3DqIP_Final.xlsx",sheet="DEGs_FPKM>10_Enrich2"))
+names(Astroenr)[2] <- "ID"
+Astroenr <- dplyr::select(Astroenr, "ID","Astrocyte_enrichment_control", "Astrocyte_enrichment_hM3Dq")
+
+OFCGq2 <- dplyr::left_join(OFCGq, FPKM_TMM_av, by = "ID")
+OFCGq2 <- dplyr::left_join(OFCGq2, Astroenr, by = "ID")
+OFCGq2 <- dplyr::select(OFCGq2, "ID", "logFC", "adj.P.val","FPKM_ControlIP", "FPKM_hM3DqIP", "Astrocyte_enrichment_control", "Astrocyte_enrichment_hM3Dq")
+OFCGq2$ID <- as.character(OFCGq$ID)
+OFCGq2$ID  <- toupper(OFCGq$ID)
+
+#Shared gene matrix and heatmap
+chord <- chord_dat(data = circ, genes=OFCGq2, process = terms) #make binary matrix of terms and genes
+chord <- as.data.frame(chord[,-11])
+chord$Gene <- rownames(chord)
+chord_long <- pivot_longer(chord, -Gene, names_to = "Term", values_to = "Present")
+chord_present <- chord_long[chord_long$Present == 1, ]
+chord_present$Gene <- factor(chord_present$Gene, levels = rev(unique(chord_present$Gene)))
+chord_present$Term <- factor(chord_present$Term, levels = unique(chord_present$Term))
+ggplot(chord_present, aes(x = Term, y = Gene)) +
+  geom_point(size = 1, shape = 20, fill = "black", color = "black") +
+  theme_minimal() +
+  labs(x = NULL, y = NULL) +
+  theme(axis.text.x = element_text(size=0, angle = 45, hjust = 1),
+        panel.grid = element_blank(),            # remove all grid lines
+        panel.background = element_blank(),      # remove gray background
+        plot.background = element_blank(),
+        plot.margin = margin(0, 0, 0, 0, "cm"), axis.text.y = element_text(size=0))
+
+#alternative matrix heatmap
+OFCGq2$logFC <- 1
+chord <- chord_dat(data = circ, genes=OFCGq2, process = terms)
+
+P <- GOHeat_fix(chord, nlfc = 1, fill.col = c("black","white"))
+P + coord_flip() +
+  theme_minimal() +
+          theme(axis.text.x = element_text(size = 0),
+          axis.text.y = element_text(size = 5, angle = 45, hjust = 1),
+          plot.margin = margin(0, 5, 0, 3, "cm"),
+          legend.position = "none")
+
+#FPKM heatmap
+Metabgenes <- as.data.frame(rownames(chord))
+names(Metabgenes)[1] <- "ID"
+Metabgenes <- dplyr::left_join(Metabgenes, OFCGq2, by = "ID")
+rownames(Metabgenes) <- Metabgenes$ID
+
+Enrichmatrix <- chord |> dplyr::select(-11) |> dplyr::mutate(ID = rownames(chord))
+Enrichmatrix <- dplyr::left_join(Enrichmatrix, Metabgenes, by = "ID")
+Enrichmatrix$ID <- tools::toTitleCase(tolower(Enrichmatrix$ID))
+write.csv(Enrichmatrix, "/Users/mikaholtz/Downloads/Enrichmentmatrix.csv", row.names = FALSE)
+
+library(pheatmap)
+
+FPKM_metab <- as.matrix(Metabgenes[, c("FPKM_ControlIP", "FPKM_hM3DqIP")])
+FPKM_metab <- log10(FPKM_metab)
+
+pheatmap(FPKM_metab,             # Normalize each gene (optional)
+         color = colorRampPalette(c("white","gray"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = TRUE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+#logFC heatmap
+LogFC_metab <- as.matrix(Metabgenes[, c("logFC")])
+color_palette <- colorRampPalette(c("blue", "white", "red"))(100)
+
+# Define breaks centered at zero
+# Get max absolute value for symmetric breaks
+max_val <- max(abs(LogFC_metab), na.rm = TRUE)
+breaks <- seq(-max_val, max_val, length.out = 101)
+
+pheatmap(LogFC_metab,             # Normalize each gene (optional)
+         color = color_palette,
+         breaks = breaks,
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+#GOChord(chord, space = 0.02, gene.order = 'logFC', gene.space = 0.25, gene.size = 3)
+#GOChord(chord, limit = c(4, 0), gene.order = 'logFC')
+
+#FDR heatmap
+pval_metab <- as.matrix(Metabgenes[, c("adj.P.val")])
+pval_metab <- -log10(pval_metab)
+
+pheatmap(pval_metab,             # Normalize each gene (optional)
+         color = colorRampPalette(c("white","#FFDB58"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+#enrichment heatmap
+Astroenr_metab <- as.matrix(Metabgenes[, c("Astrocyte_enrichment_control", "Astrocyte_enrichment_hM3Dq")])
+#Astroenr_metab <- log10(Astroenr_metab)
+
+pheatmap(Astroenr_metab,             # Normalize each gene (optional)
+         color = colorRampPalette(c("white","green"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         show_rownames = FALSE,
+         show_colnames = FALSE,
+         fontsize_row = 5,
+         fontsize_col = 5
+         #main = "FPKM Heatmap"
+         )
+
+```
