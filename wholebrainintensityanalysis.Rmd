@@ -1,0 +1,60 @@
+---
+title: "wholebrainintensities"
+output: html_document
+date: "2025-04-17"
+---
+
+```{r setup, include=FALSE}
+#load these packages - install beforehand if not used before
+library(dplyr)
+library(readr)
+library(stringr)
+library(readxl)
+library(writexl)
+```
+
+```{r}
+input_file <- "G:/hM3Dq5_intensities_0531.xlsx" #define input file name and location
+output_file <- "G:/hM3Dq5_intensities_0531_summary.xlsx" #define output file name and location
+df<-read_excel(input_file, sheet="Intensities") #read input data from excel
+
+#Define regions to extract
+df_clean <- df %>%
+  mutate(
+    hemisphere = if_else(
+      str_detect(Tracings, "-[RL]$"), #isolate ROIs by hemisphere
+      str_remove(str_extract(Tracings, "-[RL]$"), "-"),
+      ""  # Empty string for rows without -R or -L
+    ),
+    base_region = str_remove(Tracings, ",? layer [^,-]+"),
+    base_region = str_remove(base_region, "-[RL]$"), #extracts region names, separated by R or L
+    #code below pools all regions containing "Substantia nigra" or "Orbital area" as the data from NeuroInfo is separated by subregion
+    base_region = case_when(
+      str_detect(base_region, "Substantia nigra") ~ "Substantia nigra",
+      str_detect(base_region, "Orbital area") ~ "Orbital area",
+      TRUE ~ base_region
+    )
+  )
+
+#Calculate intensities weighted by Pixel count of regions, mean and max
+weighted_summary <- df_clean %>%
+  group_by(base_region, hemisphere) %>%
+  summarise(
+    weighted_mean_intensity = sum(Mean * `Pixel Count`) / sum(`Pixel Count`), #calculate weighted mean pixel intensity
+    weighted_max_intensity = sum(`Max...4` * `Pixel Count`) / sum(`Pixel Count`), #calculate weighted max intensity
+    total_pixel_count = sum(`Pixel Count`), #total pixel count of each region
+    total_volume_intensity = sum(Mean * `Pixel Count`), #total pixel volume intensity of each region
+    .groups = "drop"
+  )
+
+#export data to excel name and location defined in line 17
+write_xlsx(
+  list(
+    OriginalData = df,
+    RegionSummary = weighted_summary
+  ),
+  path = output_file
+)
+
+
+```
