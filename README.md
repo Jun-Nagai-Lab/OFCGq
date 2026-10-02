@@ -1,8 +1,10 @@
 # OFCGq
+
 This contains code for analyzing raw fiber photometry, RNA-sequencing, TissueCyte whole-brain images, blink tracking and and engram calcium activity, and wth linear mixed-effects modeling. Detailed experimental procedures and analysis methods are described in the Methods section of the associated manuscript.
 
 
 --FiberPhotometry--
+
 All analyses run on Python ver. 3.13.1 
 
 Fig1f_adra1acKO_eLacco: 
@@ -22,16 +24,19 @@ Fiber photometry was used to measure neural intracellular lactate signals signal
 
 
 --RNA-sequencing--
+
 Contains batch scripts for raw FASTQ file processing and differential gene expression analysis in R using edgeR.
 Analyses run on R ver. 4.5.3, RStudio ver. 2026.07.1, and command line
 
 
 --WholeBrainAnalysis--
+
 Includes R code used to analyze regional intensity values extracted from NeuroInfo.
 Analyses run on R ver. 4.5.3 and RStudio ver.2026.07.1
 
 
 --Peri-Blink Calcium--
+
 Includes code for blink detection from DeepLabCut eyelid tracking and analysis of blink-aligned ΔF/F traces in Fos+ and Fos- cells. MATLAB ver. R2024b
 
 
