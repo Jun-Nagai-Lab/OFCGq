@@ -7,8 +7,12 @@ This contains code for analyzing raw fiber photometry, RNA-sequencing, TissueCyt
 
 All analyses run on Python ver. 3.13.1 
 
+Contains initial downsampling of raw binned trace data.
+
+GRABNE and calcium analyses for measuring NA and calcium responses to airpuffs in orbitoforntal cortex (OFC).
+
 Fig1f_adra1acKO_eLacco: 
-Fiber photometry was used to measure extracellular lactate signals in orbitofrontal cortex (OFC) astrocytes from control mice and mice with conditional knockout (cKO) of Adra1a in OFC astrocytes.
+Fiber photometry was used to measure extracellular lactate signals in OFC astrocytes from control mice and mice with conditional knockout (cKO) of Adra1a in OFC astrocytes.
 
 Fig1h_iBARK_eLacco: 
 Fiber photometry was used to measure extracellular lactate signals signal in OFC from control mice and mice with iβARK2 in OFC astrocytes.
@@ -41,4 +45,5 @@ Includes code for blink detection from DeepLabCut eyelid tracking and analysis o
 
 
 --LMM--
+
 Linear mixed-effects modeling (LMM) stats: Includes analysis of nested physiological data (Group, Mouse, and Cell hierarchies) using LMM. MATLAB ver. R2024b
